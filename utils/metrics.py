@@ -35,6 +35,22 @@ def bootstrap_ci(y, pred, n_boot, seed=0):
     return {k: (np.nanpercentile(v, 2.5), np.nanpercentile(v, 97.5)) for k, v in stats.items()}
 
 
+def wald_ci(m):
+    """Wald 95% CI p +/- 1.96*sqrt(p(1-p)/n), clipped to [0, 1] (the CI used in the original report).
+    m = binary_metrics() output."""
+    ns = {"Accuracy": m["TP"] + m["FN"] + m["TN"] + m["FP"],
+          "Sensitivity": m["TP"] + m["FN"], "Specificity": m["TN"] + m["FP"]}
+    out = {}
+    for k, n in ns.items():
+        p = m[k]
+        if not n:
+            out[k] = (float("nan"), float("nan"))
+            continue
+        h = 1.96 * np.sqrt(p * (1 - p) / n)
+        out[k] = (max(0.0, p - h), min(1.0, p + h))
+    return out
+
+
 def youden_threshold(y, score):
     best_t, best_j = 0.5, -1
     for t in np.unique(score):

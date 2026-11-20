@@ -11,3 +11,4 @@ scikit-multilearn~=0.2.0
 huggingface-hub~=0.23.4
 tensorboard~=2.17.0
 tqdm
+pandas  # postprocess/ALFA.py (eval_mtm_vt_postprocess.py)

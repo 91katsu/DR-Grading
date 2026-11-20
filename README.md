@@ -8,6 +8,8 @@ compared against the results of the original paper.
 ```
 train_dr.py          training / fine-tuning entry point
 eval_mtm_vt.py       mtmDR / vtDR evaluation of a checkpoint
+eval_mtm_vt_postprocess.py  predictions_*.csv + saved detections -> deployed post-processing (ALFA) -> mtmDR / vtDR (CPU)
+postprocess/         unmodified copy of the deployed post-processing v2.1.9 (ALFA tables, lesion thresholds); see its README
 model/               one file per model family; model/__init__.py = registry (--model) + build_model()
   retfound_mae.py    RETFound_mae (ViT-L/16, MAE)
   dinov2.py          Dinov2, RETFound_dinov2 (timm DINOv2 ViTs)
@@ -152,6 +154,33 @@ python eval_mtm_vt.py --resume output_dir/<task>/checkpoint-best.pth --data_path
 - `--tta hflip|flip4`: average the softmax over flipped views; results go to `<checkpoint folder>/tta_<mode>/`.
 - Writes `predictions_val.csv`, `predictions_test.csv`, `mtm_vt_metrics.csv` next to the checkpoint (or `--out_dir`).
 
+## 2b. Evaluation with the deployed post-processing (classifier + detection, ALFA)
+
+```
+python eval_mtm_vt_postprocess.py --pred_csv output_dir/<task>/predictions_val.csv --det_root D:/exp_result/fundus/Det_Raw/det_raw_0JCN --age 40
+```
+
+- CPU only, no torch (numpy + pandas), a few seconds for 466 images; safe to run while training.
+- `--pred_csv`: `predictions_{val,test}.csv` from `eval_mtm_vt.py` (Cls = argmax, cls_prob = max of p0..p4).
+  `--det_root`: raw detections `<det_root>/<device>/raw/<image stem>.json` (all boxes of the detection service,
+  cropped/padded pixels + `offset`; e.g. `D:\exp_result\fundus\Det_Raw\det_raw_0JCN` = jye weights for all devices).
+- Per image the deployed `postprocess()` is called unchanged: IoM-NMS 0.5 -> boxes to the original image ->
+  `ALFA.contradict_DR5` -> lesion thresholds. Not reproduced: the API quality filter and spot-light elimination.
+- `--age` (default 40 = API default) selects the type-0 lesion thresholds from `postprocess/threshold_config.json`
+  (40-50: SE 0.4 / HE 0.45 ...; >=50: SE 0.24 / HE 0.324 ...).
+- `--threshold_config <json>`: other lesion thresholds (same format); omitted = `postprocess/threshold_config.json` (deployed).
+  `postprocess/threshold_config_tuned.json` differs only in type 0, age >= 50: IH (2) 0.2 -> 0.08, HE (8) 0.324 -> 0.06,
+  LS (12) 0.359 -> 0.08, so it changes results only with `--age` >= 50.
+- `--type_map JYE01=0,Canon=0,Nidek=0` (default): postprocess type per device (0 = JYE01 tables + age thresholds,
+  1 = desktop tables). Use the detections of the same weights, e.g. `--det_root .../det_raw_0J_1CN --type_map JYE01=0,Canon=1,Nidek=1`.
+- `--ci wald` (default, as the report) or `--ci bootstrap` (as `eval_mtm_vt.py`).
+- Prints raw (argmax) and alfa rows, overall and per device, 5-class acc + quadratic kappa, how many images
+  ALFA changed (fixed / broke). **Without `--out_dir` nothing is written** (terminal only).
+- `--out_dir <path>`: also write `predictions_postprocess.csv` (per image cls_raw / det_init / cls_alfa),
+  `mtm_vt_metrics_postprocess.csv`, `run_config.json` (sha256 of the `postprocess/` files).
+- `--out_dir <path> --image_root D:/data/fundus_2 --save_boxes`: also write the final boxes (normalised cx cy w h,
+  as the API). The image size only affects these boxes, not the grade.
+
 ## 3. SVM on backbone features (optional)
 
 ```
@@ -167,4 +196,5 @@ python tools/svm_dr.py --resume output_dir/<task>/checkpoint-best.pth --data_pat
 | checkpoint-best.pth, log.txt, metrics_*.csv, confusion_matrix_test.jpg | `./output_dir/<task>/` | `--output_dir <path>` (train_dr.py) |
 | TensorBoard logs | `./output_logs/<task>/` | `--log_dir <path>` (train_dr.py) |
 | predictions_*.csv, mtm_vt_metrics.csv | folder of `--resume` | `--out_dir <path>` (eval_mtm_vt.py) |
+| predictions_postprocess.csv, mtm_vt_metrics_postprocess.csv, run_config.json | not written (terminal only) | `--out_dir <path>` (eval_mtm_vt_postprocess.py) |
 | svm results / feature cache | `<folder of --resume>/svm/` | `--out_dir <path>` (svm_dr.py) |
