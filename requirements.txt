@@ -1,3 +1,4 @@
+# torch / torchvision: install the build for your CUDA (tested: torch 2.5.1, torchvision 0.20.1, cu121)
 opencv-python~=4.9.0.80
 Pillow~=10.2.0
 pycm~=4.0
@@ -8,4 +9,5 @@ numpy~=1.26.4
 matplotlib~=3.8.4
 scikit-multilearn~=0.2.0
 huggingface-hub~=0.23.4
-tensorboard~=2.17.0tqdm
+tensorboard~=2.17.0
+tqdm
