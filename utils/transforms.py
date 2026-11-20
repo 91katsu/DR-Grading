@@ -41,9 +41,15 @@ def _build_transform(is_train, args):
         return _fundus_transform(is_train, args, mean, std)
 
     if is_train == 'train':
+        # --crop_scale / --crop_ratio: RandomResizedCrop range (None = timm default scale (0.08, 1), ratio (3/4, 4/3));
+        # "--crop_scale 1 1 --crop_ratio 1 1" = no random crop (the whole square image is resized to input_size)
+        crop_scale = getattr(args, "crop_scale", None)
+        crop_ratio = getattr(args, "crop_ratio", None)
         return create_transform(
             input_size=args.input_size,
             is_training=True,
+            scale=tuple(crop_scale) if crop_scale else None,
+            ratio=tuple(crop_ratio) if crop_ratio else None,
             color_jitter=args.color_jitter,
             auto_augment=args.aa,
             interpolation='bicubic',

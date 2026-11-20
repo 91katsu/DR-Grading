@@ -87,6 +87,11 @@ def get_args_parser():
                         help="CLAHE on the Y channel (clip 4, 8x8 tiles) before all transforms, "
                              "same as the deployed DR model; applied to train/val/test alike")
     parser.add_argument("--color_jitter", type=float, default=None, metavar="PCT")
+    parser.add_argument("--crop_scale", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+                        help="RandomResizedCrop area range for --aug_mode default (timm default 0.08 1.0); "
+                             "'--crop_scale 1 1 --crop_ratio 1 1' disables the random crop")
+    parser.add_argument("--crop_ratio", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+                        help="RandomResizedCrop aspect-ratio range (timm default 0.75 1.333)")
     parser.add_argument("--aa", type=str, default="rand-m9-mstd0.5-inc1", metavar="NAME")
     parser.add_argument("--smoothing", type=float, default=0.1)
 
@@ -106,6 +111,10 @@ def get_args_parser():
 
     # ---- Finetuning & adaptation
     parser.add_argument("--finetune", default="", type=str, help="Checkpoint id/path (see model rules below)")
+    parser.add_argument("--train_devices", nargs="+", default=None,
+                        help="Keep only these devices in TRAIN (e.g. JYE01), using <data_path>/manifest.csv")
+    parser.add_argument("--val_devices", nargs="+", default=None,
+                        help="Keep only these devices in VAL (checkpoint selection). TEST is never filtered.")
     parser.add_argument("--task", default="", type=str, help="Task name for logging/output grouping")
     parser.add_argument("--adaptation", default="finetune", choices=["finetune", "lp"],
                         help="Adaptation strategy: finetune=full fine-tune, lp=linear probe (train head only)")

@@ -18,13 +18,15 @@ model/               one file per model family; model/__init__.py = registry (--
   pretrained.py      load_pretrained(): --finetune weights (HF hub / local)
 utils/
   engine.py          train_one_epoch / evaluate
-  datasets.py        ImageFolder datasets, data-ratio subsampling
+  datasets.py        ImageFolder datasets, device filter (--train_devices / --val_devices), data-ratio subsampling
   transforms.py      CLAHE, timm default and fundus augmentation
   metrics.py         binary metrics, bootstrap CI, Youden threshold, report numbers
   lr_decay.py lr_sched.py misc.py pos_embed.py
 tools/
   prepare_dr_data.py   raw handover data -> Fundus_Dataset/DR5/{train,val,test}/{0..4} + manifest.csv
   preprocess_fundus.py crop retinal disc, pad square, resize 512 -> Fundus_Dataset/DR5_512
+  dedup_dataset.py     de-duplicated copy of a dataset (problem*.txt lists)
+  build_valpros_dataset.py  DR5_512 -> DR5_512_valpros_dedup (val = prospective test, de-duplicated train)
   svm_dr.py            SVM on backbone features (optional)
 ```
 
@@ -45,9 +47,30 @@ python tools/preprocess_fundus.py      # crop fundus disc, pad square, resize 51
 ```
 
 `Fundus_Dataset/DR5_512_prosval` = train/test junctions to `DR5_512` + val = prospective val only (281 images).
-This is the `--data_path` used below.
+
+`Fundus_Dataset/DR5_512_valpros_dedup` (used by the best model below) — 7938 images, ~1.8 GB, real files (no junctions):
+
+```
+python tools/build_valpros_dataset.py --src Fundus_Dataset/DR5_512 --dst Fundus_Dataset/DR5_512_valpros_dedup --problems D:/data/fundus_yolo/problem.txt D:/data/fundus_yolo/problem2.txt
+```
+
+- train = retro train + prospective train (duplicates removed), **val = prospective test (466)**, test = retro test (1181).
+- Its `manifest.csv` (columns `image`, `device`, `cohort`, ...) is required by `--train_devices` / `--val_devices`
+  and by the per-device rows of `eval_mtm_vt.py`; copy it together with the images.
 
 ## 1. Training
+
+### SwinMS, desktop only (Canon + Nidek) — best so far
+
+```
+python train_dr.py --model SwinMS --model_arch swinv2_large_window12to24_192to384 --ms_stages 0 1 2 3 --data_path Fundus_Dataset/DR5_512_valpros_dedup --train_devices Canon Nidek --val_devices Canon Nidek --nb_classes 5 --input_size 384 --clahe --grad_ckpt --batch_size 4 --accum_iter 4 --epochs 10 --warmup_epochs 1 --blr 1e-3 --layer_decay 0.9 --drop_path 0.2 --num_workers 4 --task DR5_swinMS_desktop_v1 --adaptation finetune
+python eval_mtm_vt.py --resume output_dir/DR5_swinMS_desktop_v1/checkpoint-best.pth --data_path Fundus_Dataset/DR5_512_valpros_dedup --batch_size 16 --report_split val
+```
+
+- Trains on 5381 desktop images (retro Canon + pros Canon + Nidek); JYE01 is never seen. Best epoch 6.
+- Original run (RETFound repo), prospective test 466, argmax: mtmDR sens 0.844 / spec 0.968 (JYE01 0.786 / 0.958),
+  vtDR 0.955 / 0.998. With `--tta flip4`: mtmDR sens 0.856.
+- No-random-crop variant: add `--crop_scale 1 1 --crop_ratio 1 1`.
 
 ### Swin V2-L 384 + CLAHE
 
@@ -112,6 +135,8 @@ Both are saved in the checkpoint, so `eval_mtm_vt.py` does not need them.
 | `--aug_mode fundus` | mild fundus augmentation (rotation, 70-100% crop, flips, light colour jitter); default = timm RandAugment |
 | `--grad_ckpt` | gradient checkpointing (timm models): less VRAM, slower |
 | `--no_tqdm` | default is a tqdm progress bar per epoch / eval; this switches back to a text line every 20 (train) / 10 (eval) iters (better when redirecting to a log file). Epoch summaries are printed either way |
+| `--train_devices JYE01 ...` / `--val_devices ...` | keep only these devices in TRAIN / VAL (checkpoint selection), from `<data_path>/manifest.csv`; TEST is never filtered |
+| `--crop_scale MIN MAX` / `--crop_ratio MIN MAX` | RandomResizedCrop range for `--aug_mode default` (timm default 0.08 1 / 0.75 1.333); `1 1` + `1 1` = no random crop |
 | `--seed N` | default 0; GPU runs are close but not bit-identical (cudnn.benchmark, AMP) |
 
 ## 2. Evaluation (mtmDR / vtDR, compared with the original paper)
@@ -123,6 +148,8 @@ python eval_mtm_vt.py --resume output_dir/<task>/checkpoint-best.pth --data_path
 - Model type, input size, CLAHE etc. are read from the checkpoint's saved args.
 - Prints accuracy / sensitivity / specificity (with bootstrap 95% CI, overall and per device) next to the original paper's numbers.
 - Large models (Swin V2-L): add `--batch_size 16`.
+- `--report_split val` for `DR5_512_valpros_dedup` (its val split holds the prospective test set); only argmax is reported then.
+- `--tta hflip|flip4`: average the softmax over flipped views; results go to `<checkpoint folder>/tta_<mode>/`.
 - Writes `predictions_val.csv`, `predictions_test.csv`, `mtm_vt_metrics.csv` next to the checkpoint (or `--out_dir`).
 
 ## 3. SVM on backbone features (optional)

@@ -11,6 +11,7 @@ All metrics come with bootstrap 95% CIs, overall and per device.
 
 Example:
   python eval_mtm_vt.py --resume output_dir/<task>/checkpoint-best.pth --data_path Fundus_Dataset/DR5_512_prosval
+  python eval_mtm_vt.py --resume output_dir/<task>/checkpoint-best.pth --data_path Fundus_Dataset/DR5_512_valpros_dedup \n      --report_split val [--tta flip4]
 """
 import argparse
 import csv
@@ -25,14 +26,25 @@ from utils.metrics import REPORT, TASKS, binary_metrics, bootstrap_ci, load_mani
 from utils.transforms import build_transform
 
 
+TTA_VIEWS = {
+    "none": [()],
+    "hflip": [(), (3,)],                      # original + left-right flip (the flip used in training)
+    "flip4": [(), (3,), (2,), (2, 3)],        # + up-down flip + both (= 180 deg rotation)
+}
+
+
 @torch.no_grad()
 def predict(model, args, split, device):
     ds = datasets.ImageFolder(os.path.join(args.data_path, split), transform=build_transform("val", args))
     dl = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=False)
+    views = TTA_VIEWS[getattr(args, "tta", "none")]
     probs = []
     for x, _ in dl:
+        x = x.to(device)
         with torch.autocast(device_type=device.type, enabled=device.type == "cuda"):
-            probs.append(torch.softmax(model(x.to(device)).float(), dim=1).cpu())
+            # average the softmax over the flipped views (dims: 3 = width / left-right, 2 = height / up-down)
+            p = sum(torch.softmax(model(torch.flip(x, d) if d else x).float(), dim=1) for d in views) / len(views)
+        probs.append(p.cpu())
     names = [os.path.basename(p) for p, _ in ds.samples]
     labels = np.array([int(ds.classes[t]) for _, t in ds.samples])
     return names, labels, torch.cat(probs).numpy()
@@ -46,18 +58,29 @@ def main():
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--n_boot", type=int, default=2000)
+    ap.add_argument("--tta", default="none", choices=list(TTA_VIEWS),
+                    help="test-time augmentation: average softmax over flipped views. "
+                         "With --tta, results go to <checkpoint folder>/tta_<mode>/ unless --out_dir is given")
+    ap.add_argument("--report_split", default="test", choices=["test", "val"],
+                    help="split holding the prospective test set (466) compared with the report. "
+                         "'val' for Fundus_Dataset/DR5_512_valpros_dedup (val = prospective test, test = retro test); "
+                         "then only argmax is reported (a threshold tuned on the same images would be optimistic)")
     cli = ap.parse_args()
 
     ckpt = torch.load(cli.resume, map_location="cpu", weights_only=False)
     args = ckpt["args"]
     args.data_path, args.batch_size, args.num_workers = cli.data_path, cli.batch_size, cli.num_workers
+    args.tta = cli.tta
     out_dir = cli.out_dir or os.path.dirname(os.path.abspath(cli.resume))
+    if cli.tta != "none" and not cli.out_dir:
+        out_dir = os.path.join(out_dir, f"tta_{cli.tta}")
+    os.makedirs(out_dir, exist_ok=True)
 
     model = build_model(args, drop_path_rate=0.0)
     print(model.load_state_dict(ckpt["model"], strict=True))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
-    print(f"checkpoint epoch {ckpt.get('epoch')} | model {args.model} | input {args.input_size}")
+    print(f"checkpoint epoch {ckpt.get('epoch')} | model {args.model} | input {args.input_size} | tta {cli.tta}")
 
     manifest = load_manifest(cli.data_path)
     device_of = lambda n: manifest.get(n, {}).get("device", "?")
@@ -73,12 +96,16 @@ def main():
             for n, yy, pp in zip(names, y, p):
                 w.writerow([n, cohort_of(n), device_of(n), yy, int(pp.argmax()), *[f"{v:.5f}" for v in pp]])
 
-    # 5-class summary on test
-    names, y, p = res["test"]
-    pred5 = p.argmax(1)
+    # 5-class summary
     from sklearn.metrics import cohen_kappa_score, confusion_matrix
-    print(f"\n[test 5-class] acc {np.mean(pred5 == y):.4f} | quadratic kappa {cohen_kappa_score(y, pred5, weights='quadratic'):.4f}")
-    print("confusion matrix (rows=GT 0-4, cols=pred 0-4):\n", confusion_matrix(y, pred5, labels=range(5)))
+    for split in (("val", "test") if cli.report_split == "val" else ("test",)):
+        _, ys, ps = res[split]
+        print(f"\n[{split} 5-class] acc {np.mean(ps.argmax(1) == ys):.4f} | "
+              f"quadratic kappa {cohen_kappa_score(ys, ps.argmax(1), weights='quadratic'):.4f}")
+        print("confusion matrix (rows=GT 0-4, cols=pred 0-4):\n", confusion_matrix(ys, ps.argmax(1), labels=range(5)))
+
+    names, y, p = res[cli.report_split]
+    pred5 = p.argmax(1)
 
     vnames, vy, vp = res["val"]
     pros_val = np.array([cohort_of(n) == "pros" for n in vnames])
@@ -88,9 +115,11 @@ def main():
     for task, k in TASKS.items():
         yb = (y >= k).astype(int)
         score = p[:, k:].sum(1)
-        thr = youden_threshold((vy[pros_val] >= k).astype(int), vp[pros_val][:, k:].sum(1))
-        ops = {"argmax": (pred5 >= k).astype(int), f"val-thr={thr:.3f}": (score >= thr).astype(int)}
-        print(f"\n===== {task} (test n={len(y)}, positives={yb.sum()}) =====")
+        ops = {"argmax": (pred5 >= k).astype(int)}
+        if cli.report_split == "test":
+            thr = youden_threshold((vy[pros_val] >= k).astype(int), vp[pros_val][:, k:].sum(1))
+            ops[f"val-thr={thr:.3f}"] = (score >= thr).astype(int)
+        print(f"\n===== {task} ({cli.report_split} n={len(y)}, positives={yb.sum()}) =====")
         print(f"{'operating point':18} {'group':7} {'n':>4} {'pos':>4}  {'Accuracy':>22} {'Sensitivity':>22} {'Specificity':>22}  TP FN TN FP")
         r = REPORT[task]
         print(f"{'REPORT':18} {'all':7} {466:4} {'':>4}  {r['Accuracy']:22.4f} {r['Sensitivity']:22.4f} {r['Specificity']:22.4f}")

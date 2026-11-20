@@ -13,6 +13,12 @@ def build_dataset(is_train, args):
     root = os.path.join(args.data_path, is_train)
     dataset = datasets.ImageFolder(root, transform=transform)
 
+    # --train_devices / --val_devices: keep only images of these devices (from <data_path>/manifest.csv);
+    # TEST is never filtered
+    keep = {"train": getattr(args, "train_devices", None), "val": getattr(args, "val_devices", None)}.get(is_train)
+    if keep:
+        _filter_devices(dataset, args.data_path, keep, is_train)
+
     if is_train == 'train':
         ratio = float(getattr(args, "dataratio", 1.0))
         seed = int(getattr(args, "seed", 0))
@@ -30,6 +36,27 @@ def build_dataset(is_train, args):
             dataset = Subset(dataset, idx)
 
     return dataset
+
+
+def _filter_devices(dataset, data_path, devices, split):
+    """In-place: keep only images whose device (from <data_path>/manifest.csv) is in `devices`."""
+    import csv
+    from collections import Counter
+    path = os.path.join(data_path, "manifest.csv")
+    with open(path, encoding="utf-8") as fh:
+        device_of = {r["image"]: r["device"] for r in csv.DictReader(fh)}
+    missing = [p for p, _ in dataset.samples if os.path.basename(p) not in device_of]
+    if missing:
+        raise ValueError(f"{len(missing)} {split} images not in {path}, e.g. {missing[0]}")
+    n0 = len(dataset.samples)
+    dataset.samples = [(p, t) for p, t in dataset.samples if device_of[os.path.basename(p)] in devices]
+    dataset.imgs = dataset.samples
+    dataset.targets = [t for _, t in dataset.samples]
+    if not dataset.samples:
+        raise ValueError(f"no {split} images left for devices {devices}")
+    cnt = Counter(dataset.targets)
+    print(f"[devices] {split}: kept {len(dataset.samples)}/{n0} images of {devices}; "
+          f"per class {[cnt.get(i, 0) for i in range(len(dataset.classes))]}")
 
 
 def _stratified_indices(targets, ratio: float, seed: int):
