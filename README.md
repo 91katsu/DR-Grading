@@ -191,10 +191,19 @@ python eval_mtm_vt_postprocess.py --pred_csv output_dir/<task>/predictions_val.c
 ## 3. SVM on backbone features (optional)
 
 ```
-python tools/svm_dr.py --resume output_dir/<task>/checkpoint-best.pth --data_path Fundus_Dataset/DR5_512_prosval
+python tools/svm_dr.py --resume output_dir/<task>/checkpoint-best.pth --data_path Fundus_Dataset/DR5_512_valpros_dedup --tta flip4
+python tools/svm_dr.py ... --svm_train_devices Canon Nidek JYE01   # SVM trained on these TRAIN devices only
+bash scripts/run_svm.sh                                            # seeds 0-2 x 2 SVM training sets, + ALFA
 ```
 
-- Features cached in `<checkpoint folder>/svm/features_*.npz` (GPU only needed the first time).
+- The fine-tuned backbone is frozen; the feature right before the Linear head is cached in
+  `<checkpoint folder>/svm_features/features_<split>[_<tta>].npz` (GPU only needed the first time).
+  `--tta flip4` averages the features over the 4 flipped views.
+- `--select cv` (default): kernel / C / class_weight chosen by patient-grouped 5-fold CV inside TRAIN
+  (out-of-fold mtmDR (Sens+Spec)/2); VAL and TEST are never used for a choice. `--select val` = old behaviour
+  (only valid if VAL is not the test set).
+- Probabilities: logistic regression on the out-of-fold SVM decision values. `predictions_val.csv` /
+  `predictions_test.csv` have the `eval_mtm_vt.py` format, so `eval_mtm_vt_postprocess.py` (ALFA) runs on them.
 
 ## 4. Output locations
 
@@ -204,4 +213,4 @@ python tools/svm_dr.py --resume output_dir/<task>/checkpoint-best.pth --data_pat
 | TensorBoard logs | `./output_logs/<task>/` | `--log_dir <path>` (train_dr.py) |
 | predictions_*.csv, mtm_vt_metrics.csv | folder of `--resume` | `--out_dir <path>` (eval_mtm_vt.py) |
 | predictions_postprocess.csv, mtm_vt_metrics_postprocess.csv, run_config.json | not written (terminal only) | `--out_dir <path>` (eval_mtm_vt_postprocess.py) |
-| svm results / feature cache | `<folder of --resume>/svm/` | `--out_dir <path>` (svm_dr.py) |
+| svm results / feature cache | `<folder of --resume>/svm_<tta>_<select>_<devices>/`, `<folder of --resume>/svm_features/` | `--out_dir` / `--feat_dir` (svm_dr.py) |
