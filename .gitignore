@@ -435,3 +435,5 @@ output_logs/
 *.pth
 *.pt
 *.npz
+
+.vscode/
