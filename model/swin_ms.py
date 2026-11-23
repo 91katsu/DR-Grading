@@ -20,11 +20,28 @@ import torch.nn as nn
 from timm.models.layers import trunc_normal_
 
 
+def swin_size_kwargs(args):
+    """img_size / window_size for timm Swin models, so --input_size other than the arch's default works.
+
+    timm Swin fixes the input size at build time. Every stage's token grid (input_size/4, /8, /16, /32) must be
+    divisible by the window, or be smaller than it (then the window is clamped to the grid), e.g.
+      384: window 24 (arch default)   448: --window_size 14 or 28   512: --window_size 16 or 32
+    Swin V2 pretrained weights load at any window (continuous position bias). Non-Swin archs: no kwargs.
+    """
+    if not str(getattr(args, "model_arch", "")).startswith("swin"):
+        return {}
+    kw = {"img_size": args.input_size}
+    if getattr(args, "window_size", None):
+        kw["window_size"] = args.window_size
+    return kw
+
+
 class SwinMultiStage(nn.Module):
     def __init__(self, arch="swinv2_large_window12to24_192to384", num_classes=5, drop_path_rate=0.2,
-                 stages=(0, 1, 2, 3), head_dropout=0.0, pretrained=True):
+                 stages=(0, 1, 2, 3), head_dropout=0.0, pretrained=True, **size_kwargs):
         super().__init__()
-        base = timm.create_model(arch, pretrained=pretrained, num_classes=0, drop_path_rate=drop_path_rate)
+        base = timm.create_model(arch, pretrained=pretrained, num_classes=0, drop_path_rate=drop_path_rate,
+                                 **size_kwargs)
         # keep the backbone modules under their original names
         self.patch_embed = base.patch_embed
         self.layers = base.layers
@@ -82,4 +99,4 @@ def SwinMS(args, num_classes=5, drop_path_rate=0.2, **kwargs):
     """--model SwinMS --model_arch <timm swinv2 name> [--ms_stages 0 1 2 3]"""
     return SwinMultiStage(arch=args.model_arch, num_classes=num_classes, drop_path_rate=drop_path_rate,
                           stages=getattr(args, "ms_stages", None) or (0, 1, 2, 3),
-                          head_dropout=getattr(args, "ms_head_dropout", 0.0))
+                          head_dropout=getattr(args, "ms_head_dropout", 0.0), **swin_size_kwargs(args))

@@ -28,7 +28,7 @@ from timm.data.mixup import Mixup
 import utils.lr_decay as lrd
 import utils.misc as misc
 from model import MODEL_ARCH_HELP, MODELS, build_model, load_pretrained
-from utils.datasets import build_dataset
+from utils.datasets import build_dataset, device_class_weights
 from utils.engine import train_one_epoch, evaluate
 from utils.misc import NativeScalerWithGradNormCount as NativeScaler
 
@@ -58,6 +58,10 @@ def get_args_parser():
     parser.add_argument("--model_arch", default="dinov3_vits16", type=str, metavar="MODEL_ARCH",
                         help="Architecture within the family (only Timm / SwinMS / Dinov2 / Dinov3 use it; see table below)")
     parser.add_argument("--input_size", default=256, type=int, help="Image size")
+    parser.add_argument("--window_size", type=int, default=None,
+                        help="--model Timm/SwinMS with a Swin arch: attention window (default = arch's, 24 for "
+                             "swinv2_*_window12to24_192to384). Needed when --input_size is not 384: "
+                             "448 -> 14 or 28, 512 -> 16 or 32")
     parser.add_argument("--ms_stages", type=int, nargs="+", default=[0, 1, 2, 3],
                         help="--model SwinMS: Swin stages (0-3) whose globally pooled features are concatenated")
     parser.add_argument("--ms_head_dropout", type=float, default=0.0,
@@ -110,11 +114,24 @@ def get_args_parser():
     parser.add_argument("--mixup_mode", type=str, default="batch")
 
     # ---- Finetuning & adaptation
-    parser.add_argument("--finetune", default="", type=str, help="Checkpoint id/path (see model rules below)")
+    parser.add_argument("--finetune", default="", type=str,
+                        help="Checkpoint id/path (see model rules below). Timm / SwinMS: a checkpoint-best.pth of "
+                             "train_dr.py (same model / arch / input size), e.g. stage 2 of APTOS -> DR5 training")
+    parser.add_argument("--finetune_head", default="keep", choices=["keep", "reinit"],
+                        help="Timm / SwinMS --finetune: keep the classifier head of the checkpoint (if it has the "
+                             "same shape) or re-initialise it")
     parser.add_argument("--train_devices", nargs="+", default=None,
                         help="Keep only these devices in TRAIN (e.g. JYE01), using <data_path>/manifest.csv")
     parser.add_argument("--val_devices", nargs="+", default=None,
                         help="Keep only these devices in VAL (checkpoint selection). TEST is never filtered.")
+    parser.add_argument("--balance", default="none", choices=["none", "device_class"],
+                        help="TRAIN sampling. device_class = WeightedRandomSampler (with replacement, same epoch length) "
+                             "so that every device has the class distribution of the whole TRAIN set "
+                             "(e.g. JYE01, 77%% grade 0, is no longer mostly grade 0); single GPU only")
+    parser.add_argument("--select_metric", default="mtm_bacc_auc", choices=["mtm_bacc_auc", "score"],
+                        help="VAL metric that picks checkpoint-best.pth. mtm_bacc_auc (default) = "
+                             "0.5*(mtmDR sens+spec)/2 at argmax + 0.5*mtmDR AUC (P2+P3+P4), needs --nb_classes 5; "
+                             "score = (macro F1 + macro AUC + kappa)/3 (used by runs before 2026-11-21)")
     parser.add_argument("--task", default="", type=str, help="Task name for logging/output grouping")
     parser.add_argument("--adaptation", default="finetune", choices=["finetune", "lp"],
                         help="Adaptation strategy: finetune=full fine-tune, lp=linear probe (train head only)")
@@ -208,9 +225,18 @@ def main(args, criterion):
     global_rank = misc.get_rank()
 
     if not args.eval:
-        sampler_train = torch.utils.data.DistributedSampler(
-            dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-        )
+        if args.balance == "device_class":
+            if num_tasks > 1:
+                raise ValueError("--balance device_class supports a single GPU only")
+            weights = device_class_weights(dataset_train, args.data_path)
+            sampler_train = torch.utils.data.WeightedRandomSampler(
+                weights, num_samples=len(weights), replacement=True,
+                generator=torch.Generator().manual_seed(args.seed),
+            )
+        else:
+            sampler_train = torch.utils.data.DistributedSampler(
+                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            )
         print(f"Sampler_train = {sampler_train}")
         if args.dist_eval:
             if len(dataset_val) % num_tasks != 0:
@@ -363,7 +389,9 @@ def main(args, criterion):
     for epoch in range(args.start_epoch, args.epochs):
         # DistributedSampler shuffles with seed + epoch: call set_epoch on single GPU too,
         # otherwise every epoch sees the same order
-        data_loader_train.sampler.set_epoch(epoch)
+        # (WeightedRandomSampler of --balance has no set_epoch: its generator draws new samples every epoch)
+        if hasattr(data_loader_train.sampler, "set_epoch"):
+            data_loader_train.sampler.set_epoch(epoch)
 
         train_stats = train_one_epoch(
             model, criterion, data_loader_train,
@@ -377,6 +405,9 @@ def main(args, criterion):
             num_class=args.nb_classes, log_writer=log_writer
         )
 
+        if np.isnan(val_score):
+            raise ValueError(f"--select_metric {args.select_metric} is nan on VAL (needs 5 classes and both "
+                             "mtmDR negatives and positives in VAL); use --select_metric score")
         if max_score < val_score:
             max_score = val_score
             best_epoch = epoch
@@ -385,7 +416,7 @@ def main(args, criterion):
                     args=args, model=model, model_without_ddp=model_without_ddp,
                     optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch, mode="best"
                 )
-        print(f"Best epoch = {best_epoch}, Best score = {max_score:.4f}")
+        print(f"Best epoch = {best_epoch}, Best score ({args.select_metric}) = {max_score:.4f}")
 
         if log_writer is not None:
             log_writer.add_scalar("loss/val", val_stats["loss"], epoch)

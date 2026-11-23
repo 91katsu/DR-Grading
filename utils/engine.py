@@ -95,6 +95,18 @@ def train_one_epoch(
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+def _mtm_metrics(y, pred, prob):
+    """mtmDR (grade >= 2) on 5-class outputs, as in eval_mtm_vt.py:
+    sensitivity / specificity of argmax >= 2, AUC of P(2)+P(3)+P(4). nan if not computable."""
+    if prob.ndim != 2 or prob.shape[1] != 5:
+        return float("nan"), float("nan"), float("nan")
+    pos, pred_pos = y >= 2, pred >= 2
+    sens = (pred_pos & pos).sum() / pos.sum() if pos.any() else float("nan")
+    spec = (~pred_pos & ~pos).sum() / (~pos).sum() if (~pos).any() else float("nan")
+    auc = roc_auc_score(pos, prob[:, 2:].sum(1)) if 0 < pos.sum() < len(pos) else float("nan")
+    return float(sens), float(spec), float(auc)
+
+
 @torch.no_grad()
 def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_writer):
     """Evaluate the model."""
@@ -134,16 +146,24 @@ def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_write
     precision = precision_score(true_onehot, pred_onehot, zero_division=0, average='macro')
     recall = recall_score(true_onehot, pred_onehot, zero_division=0, average='macro')
     
-    score = (f1 + roc_auc + kappa) / 3
+    score_5cls = (f1 + roc_auc + kappa) / 3
+    mtm_sens, mtm_spec, mtm_auc = _mtm_metrics(np.array(true_labels), np.array(pred_labels), np.array(pred_softmax))
+    mtm_bacc_auc = 0.5 * (mtm_sens + mtm_spec) / 2 + 0.5 * mtm_auc
+    # checkpoint-selection score returned to train_dr.py (--select_metric)
+    score = score_5cls if getattr(args, "select_metric", "mtm_bacc_auc") == "score" else mtm_bacc_auc
     if log_writer:
-        for metric_name, value in zip(['accuracy', 'f1', 'roc_auc', 'hamming', 'jaccard', 'precision', 'recall', 'average_precision', 'kappa', 'score'],
-                                       [accuracy, f1, roc_auc, hamming, jaccard, precision, recall, average_precision, kappa, score]):
+        for metric_name, value in zip(['accuracy', 'f1', 'roc_auc', 'hamming', 'jaccard', 'precision', 'recall', 'average_precision', 'kappa', 'score',
+                                       'mtm_sens', 'mtm_spec', 'mtm_auc', 'mtm_bacc_auc'],
+                                       [accuracy, f1, roc_auc, hamming, jaccard, precision, recall, average_precision, kappa, score_5cls,
+                                        mtm_sens, mtm_spec, mtm_auc, mtm_bacc_auc]):
             log_writer.add_scalar(f'perf/{metric_name}', value, epoch)
-    
+
     print(f'val loss: {metric_logger.meters["loss"].global_avg}')
     print(f'Accuracy: {accuracy:.4f}, F1 Score: {f1:.4f}, ROC AUC: {roc_auc:.4f}, Hamming Loss: {hamming:.4f},\n'
           f' Jaccard Score: {jaccard:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f},\n'
-          f' Average Precision: {average_precision:.4f}, Kappa: {kappa:.4f}, Score: {score:.4f}')
+          f' Average Precision: {average_precision:.4f}, Kappa: {kappa:.4f}, Score (f1+auc+kappa)/3: {score_5cls:.4f}\n'
+          f' mtmDR (argmax) Sens: {mtm_sens:.4f}, Spec: {mtm_spec:.4f}, AUC: {mtm_auc:.4f}, '
+          f'(bacc+AUC)/2: {mtm_bacc_auc:.4f}')
     
     metric_logger.synchronize_between_processes()
     
@@ -152,8 +172,10 @@ def evaluate(data_loader, model, device, args, epoch, mode, num_class, log_write
     with open(results_path, 'a', newline='', encoding='utf8') as cfa:
         wf = csv.writer(cfa)
         if not file_exists:
-            wf.writerow(['val_loss', 'accuracy', 'f1', 'roc_auc', 'hamming', 'jaccard', 'precision', 'recall', 'average_precision', 'kappa'])
-        wf.writerow([metric_logger.meters["loss"].global_avg, accuracy, f1, roc_auc, hamming, jaccard, precision, recall, average_precision, kappa])
+            wf.writerow(['val_loss', 'accuracy', 'f1', 'roc_auc', 'hamming', 'jaccard', 'precision', 'recall', 'average_precision', 'kappa',
+                         'score', 'mtm_sens', 'mtm_spec', 'mtm_auc', 'mtm_bacc_auc'])
+        wf.writerow([metric_logger.meters["loss"].global_avg, accuracy, f1, roc_auc, hamming, jaccard, precision, recall, average_precision, kappa,
+                     score_5cls, mtm_sens, mtm_spec, mtm_auc, mtm_bacc_auc])
     
     if mode == 'test':
         cm = ConfusionMatrix(actual_vector=true_labels, predict_vector=pred_labels)

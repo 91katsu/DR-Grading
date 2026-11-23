@@ -73,6 +73,9 @@ python eval_mtm_vt.py --resume output_dir/DR5_swinMS_desktop_v1/checkpoint-best.
 - Original run (RETFound repo), prospective test 466, argmax: mtmDR sens 0.844 / spec 0.968 (JYE01 0.786 / 0.958),
   vtDR 0.955 / 0.998. With `--tta flip4`: mtmDR sens 0.856.
 - No-random-crop variant: add `--crop_scale 1 1 --crop_ratio 1 1`.
+- Other input sizes (Swin archs, `--model Timm` / `SwinMS`): `--input_size 512 --window_size 16` (or 32), `448` -> 14 or 28.
+  Every stage's token grid must be divisible by the window. RTX A5000, batch 4 + `--grad_ckpt`: 512/w16 5.2 GB ~9 img/s,
+  512/w32 10.4 GB ~4 img/s, 448/w28 7.4 GB ~6 img/s (384/w24: 5.4 GB ~10 img/s). The data is 512, so > 512 only upsamples.
 
 ### Swin V2-L 384 + CLAHE
 
@@ -118,13 +121,13 @@ Both are saved in the checkpoint, so `eval_mtm_vt.py` does not need them.
 
 | `--model` | `--model_arch` | pre-trained weights |
 |---|---|---|
-| `Timm` | **required**: any timm name, e.g. `swinv2_large_window12to24_192to384`, `convnext_base`, `efficientnet_b3` | timm ImageNet (automatic) |
+| `Timm` | **required**: any timm name, e.g. `swinv2_large_window12to24_192to384`, `convnext_base`, `efficientnet_b3` | timm ImageNet (automatic), or `--finetune <our checkpoint-best.pth>` |
 | `Dinov2` | **required**: `dinov2_vits14` / `dinov2_vitb14` / `dinov2_vitl14` / `dinov2_vitg14` | `--finetune <local .pth>` |
 | `Dinov3` | **required**: torch.hub entry, e.g. `dinov3_vits16`, `dinov3_vitl16` | `--finetune <local .pth>` |
 | `RETFound_dinov2` | ignored (ViT-L/14) | `--finetune RETFound_dinov2_shanghai` / `RETFound_dinov2_meh` (HF hub) |
 | `RETFound_mae` | ignored (ViT-L/16) | `--finetune RETFound_mae_natureCFP` / `_meh` / `_shanghai` / `_natureOCT` (HF hub) |
 | `Hybrid` | ignored (EfficientNet-B0 + Swin V2-T) | torchvision ImageNet (automatic) |
-| `SwinMS` | **required**: timm Swin V2 name, e.g. `swinv2_large_window12to24_192to384` | timm ImageNet (automatic) |
+| `SwinMS` | **required**: timm Swin V2 name, e.g. `swinv2_large_window12to24_192to384` | timm ImageNet (automatic), or `--finetune <our checkpoint-best.pth>` |
 
 ### Project-specific options
 
@@ -140,6 +143,10 @@ Both are saved in the checkpoint, so `eval_mtm_vt.py` does not need them.
 | `--train_devices JYE01 ...` / `--val_devices ...` | keep only these devices in TRAIN / VAL (checkpoint selection), from `<data_path>/manifest.csv`; TEST is never filtered |
 | `--crop_scale MIN MAX` / `--crop_ratio MIN MAX` | RandomResizedCrop range for `--aug_mode default` (timm default 0.08 1 / 0.75 1.333); `1 1` + `1 1` = no random crop |
 | `--seed N` | default 0; GPU runs are close but not bit-identical (cudnn.benchmark, AMP) |
+| `--balance none\|device_class` | TRAIN sampling. `device_class` = WeightedRandomSampler (with replacement, same epoch length), weight p(class)/p(class \| device), so every device gets the class distribution of the whole TRAIN set while keeping its share of samples (JYE01 train is 77% grade 0). Single GPU only |
+| `--select_metric mtm_bacc_auc\|score` | VAL metric for `checkpoint-best.pth`. Default `mtm_bacc_auc` = 0.5·(mtmDR sens+spec)/2 at argmax + 0.5·mtmDR AUC (P2+P3+P4). `score` = (macro F1 + macro AUC + kappa)/3, used by all runs before 2026-11-21 (e.g. DR5_swinMS_desktop_v1): add it to reproduce them. Both are written to `metrics_val.csv` every epoch |
+| `--finetune <checkpoint-best.pth>` (Timm / SwinMS) | Start from one of our own checkpoints instead of ImageNet, e.g. two-stage training: stage 1 on APTOS 2019 (`--data_path .../APTOS2019_512 --train_devices APTOS --val_devices APTOS`), stage 2 on DR5_512 with `--finetune <stage-1 checkpoint-best.pth>`. Weights only (optimizer / epoch are not restored, unlike `--resume`); `--model`, `--model_arch`, `--ms_stages`, `--input_size`, `--window_size` must match the checkpoint |
+| `--finetune_head keep\|reinit` | With `--finetune`: keep the checkpoint's classifier head (default, if same `--nb_classes`) or re-initialise it |
 
 ## 2. Evaluation (mtmDR / vtDR, compared with the original paper)
 

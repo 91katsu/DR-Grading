@@ -61,10 +61,12 @@ def main():
     ap.add_argument("--tta", default="none", choices=list(TTA_VIEWS),
                     help="test-time augmentation: average softmax over flipped views. "
                          "With --tta, results go to <checkpoint folder>/tta_<mode>/ unless --out_dir is given")
-    ap.add_argument("--report_split", default="test", choices=["test", "val"],
+    ap.add_argument("--report_split", default="test", choices=["test", "val", "all"],
                     help="split holding the prospective test set (466) compared with the report. "
                          "'val' for Fundus_Dataset/DR5_512_valpros_dedup (val = prospective test, test = retro test); "
-                         "then only argmax is reported (a threshold tuned on the same images would be optimistic)")
+                         "then only argmax is reported (a threshold tuned on the same images would be optimistic). "
+                         "'all' = external data (e.g. APTOS2019_512): train + val + test together, argmax only; "
+                         "use --out_dir so the checkpoint's own predictions_*.csv are not overwritten")
     cli = ap.parse_args()
 
     ckpt = torch.load(cli.resume, map_location="cpu", weights_only=False)
@@ -87,7 +89,9 @@ def main():
     cohort_of = lambda n: manifest.get(n, {}).get("cohort", "?")
 
     res = {}
-    for split in ("val", "test"):
+    # "all" (external data, e.g. APTOS): also predict train and report on train + val + test together
+    pred_splits = ("val", "test", "train") if cli.report_split == "all" else ("val", "test")
+    for split in pred_splits:
         names, y, p = predict(model, args, split, device)
         res[split] = (names, y, p)
         with open(os.path.join(out_dir, f"predictions_{split}.csv"), "w", newline="", encoding="utf-8") as fh:
@@ -98,7 +102,9 @@ def main():
 
     # 5-class summary
     from sklearn.metrics import cohen_kappa_score, confusion_matrix
-    for split in (("val", "test") if cli.report_split == "val" else ("test",)):
+    if cli.report_split == "all":
+        res["all"] = tuple(np.concatenate([res[s][i] for s in pred_splits]) for i in range(3))
+    for split in {"val": ("val", "test"), "test": ("test",), "all": ("all",)}[cli.report_split]:
         _, ys, ps = res[split]
         print(f"\n[{split} 5-class] acc {np.mean(ps.argmax(1) == ys):.4f} | "
               f"quadratic kappa {cohen_kappa_score(ys, ps.argmax(1), weights='quadratic'):.4f}")
@@ -116,7 +122,7 @@ def main():
         yb = (y >= k).astype(int)
         score = p[:, k:].sum(1)
         ops = {"argmax": (pred5 >= k).astype(int)}
-        if cli.report_split == "test":
+        if cli.report_split == "test" and pros_val.any():
             thr = youden_threshold((vy[pros_val] >= k).astype(int), vp[pros_val][:, k:].sum(1))
             ops[f"val-thr={thr:.3f}"] = (score >= thr).astype(int)
         print(f"\n===== {task} ({cli.report_split} n={len(y)}, positives={yb.sum()}) =====")
@@ -124,7 +130,7 @@ def main():
         r = REPORT[task]
         print(f"{'REPORT':18} {'all':7} {466:4} {'':>4}  {r['Accuracy']:22.4f} {r['Sensitivity']:22.4f} {r['Specificity']:22.4f}")
         for op, pred in ops.items():
-            for grp in ["all", "JYE01", "Canon", "Nidek"]:
+            for grp in ["all", "JYE01", "Canon", "Nidek"] + sorted(set(devices) - {"JYE01", "Canon", "Nidek", "?"}):
                 mask = np.ones(len(y), bool) if grp == "all" else devices == grp
                 if mask.sum() == 0:
                     continue

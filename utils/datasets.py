@@ -38,13 +38,53 @@ def build_dataset(is_train, args):
     return dataset
 
 
-def _filter_devices(dataset, data_path, devices, split):
-    """In-place: keep only images whose device (from <data_path>/manifest.csv) is in `devices`."""
+def _device_map(data_path):
+    """image file name -> device, from <data_path>/manifest.csv"""
     import csv
-    from collections import Counter
     path = os.path.join(data_path, "manifest.csv")
     with open(path, encoding="utf-8") as fh:
-        device_of = {r["image"]: r["device"] for r in csv.DictReader(fh)}
+        return {r["image"]: r["device"] for r in csv.DictReader(fh)}
+
+
+def device_class_weights(dataset, data_path):
+    """--balance device_class: per-sample weights for a WeightedRandomSampler.
+
+    w(device d, class c) = p(c) / p(c | d), with p(c) = class distribution of the whole TRAIN set.
+    In the sampled stream every device then has the same class distribution p(c) (the grade no longer
+    depends on the device, e.g. JYE01 is no longer mostly grade 0), while every device keeps its share of
+    the samples (sum of the weights of a device = its number of images).
+    """
+    from collections import Counter
+    base, idx = (dataset.dataset, dataset.indices) if isinstance(dataset, Subset) else (dataset, range(len(dataset)))
+    device_of = _device_map(data_path)
+    keys = []
+    for i in idx:
+        p, t = base.samples[i]
+        name = os.path.basename(p)
+        if name not in device_of:
+            raise ValueError(f"--balance device_class: {name} not in {data_path}/manifest.csv")
+        keys.append((device_of[name], t))
+    n = len(keys)
+    n_c = Counter(t for _, t in keys)
+    n_d = Counter(d for d, _ in keys)
+    n_dc = Counter(keys)
+    w_dc = {(d, c): (n_c[c] / n) / (n_dc[(d, c)] / n_d[d]) for (d, c) in n_dc}
+    print("[balance] device_class: target class distribution "
+          f"{[round(n_c.get(c, 0) / n, 3) for c in range(len(base.classes))]}")
+    for d in sorted(n_d):
+        print(f"[balance]   {d:6} n={n_d[d]:5}  per class {[n_dc.get((d, c), 0) for c in range(len(base.classes))]}"
+              f"  weight {[round(w_dc[(d, c)], 2) if (d, c) in w_dc else '-' for c in range(len(base.classes))]}")
+    missing = [(d, c) for d in n_d for c in n_c if (d, c) not in n_dc]
+    if missing:
+        print(f"[balance]   warning: no images for (device, class) {missing}; those cells cannot be balanced")
+    return [w_dc[k] for k in keys]
+
+
+def _filter_devices(dataset, data_path, devices, split):
+    """In-place: keep only images whose device (from <data_path>/manifest.csv) is in `devices`."""
+    from collections import Counter
+    path = os.path.join(data_path, "manifest.csv")
+    device_of = _device_map(data_path)
     missing = [p for p, _ in dataset.samples if os.path.basename(p) not in device_of]
     if missing:
         raise ValueError(f"{len(missing)} {split} images not in {path}, e.g. {missing[0]}")
