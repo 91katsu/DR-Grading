@@ -214,3 +214,61 @@ bash scripts/run_svm.sh                                            # seeds 0-2 x
 | predictions_*.csv, mtm_vt_metrics.csv | folder of `--resume` | `--out_dir <path>` (eval_mtm_vt.py) |
 | predictions_postprocess.csv, mtm_vt_metrics_postprocess.csv, run_config.json | not written (terminal only) | `--out_dir <path>` (eval_mtm_vt_postprocess.py) |
 | svm results / feature cache | `<folder of --resume>/svm_<tta>_<select>_<devices>/`, `<folder of --resume>/svm_features/` | `--out_dir` / `--feat_dir` (svm_dr.py) |
+
+## 5. Experimental results
+
+**Table 1. TTA flip4, no ALFA**
+
+| Version | mtmDR Acc | mtmDR Sens | mtmDR Spec | vtDR Acc | vtDR Sens | vtDR Spec |
+|---|---|---|---|---|---|---|
+| REPORT (paper) | 0.9464 | 0.9000 | 0.9574 | 0.9957 | 0.9545 | 0.9977 |
+| Original repo model (DR5_swinMS_desktop_v1): ImageNet → DR5 desktop | 0.9464 | 0.8556 | **0.9681** | 0.9957 | 0.9545 | 0.9977 |
+| ImageNet → DR5 desktop (retrained, new checkpoint selection) | **0.9485** | 0.8556 | **0.9707** | 0.9957 | 0.9545 | 0.9977 |
+| ImageNet → DR5 desktop, input 512 | 0.9378 | 0.7778 | **0.9761** | 0.9936 | 0.9091 | 0.9977 |
+| ImageNet → DR5 desktop + JYE01 | 0.9378 | 0.8556 | 0.9574 | 0.9957 | 0.9545 | 0.9977 |
+| ImageNet → DR5 desktop + JYE01 (device × class balanced sampling) | 0.9120 | 0.8333 | 0.9309 | 0.9914 | 0.9545 | 0.9932 |
+| ImageNet → APTOS 2019 → DR5 desktop | **0.9528** | 0.8889 | **0.9681** | 0.9957 | 0.9545 | 0.9977 |
+| ImageNet → EyePACS + APTOS 2019 (5 epochs) → DR5 desktop | 0.9421 | 0.8222 | **0.9707** | 0.9914 | 0.9545 | 0.9932 |
+| ImageNet → EyePACS + APTOS 2019 (10 epochs) → DR5 desktop | 0.9442 | 0.8111 | **0.9761** | 0.9914 | 0.9545 | 0.9932 |
+
+**Table 2. TTA flip4 + ALFA (deployed lesion thresholds, age 40)**
+
+| Version | mtmDR Acc | mtmDR Sens | mtmDR Spec | vtDR Acc | vtDR Sens | vtDR Spec |
+|---|---|---|---|---|---|---|
+| REPORT (paper) | 0.9464 | 0.9000 | 0.9574 | 0.9957 | 0.9545 | 0.9977 |
+| Original repo model (DR5_swinMS_desktop_v1): ImageNet → DR5 desktop | 0.9421 | 0.7889 | **0.9787** | 0.9957 | 0.9091 | **1.0000** |
+| ImageNet → DR5 desktop (retrained, new checkpoint selection) | 0.9421 | 0.7889 | **0.9787** | 0.9957 | 0.9091 | **1.0000** |
+| ImageNet → DR5 desktop, input 512 | 0.9356 | 0.7667 | **0.9761** | 0.9957 | 0.9091 | **1.0000** |
+| ImageNet → DR5 desktop + JYE01 | 0.9442 | 0.8111 | **0.9761** | **0.9979** | 0.9545 | **1.0000** |
+| ImageNet → DR5 desktop + JYE01 (device × class balanced sampling) | 0.9421 | 0.7889 | **0.9787** | 0.9957 | 0.9545 | 0.9977 |
+| ImageNet → APTOS 2019 → DR5 desktop | 0.9464 | 0.8111 | **0.9787** | **0.9979** | 0.9545 | **1.0000** |
+| ImageNet → EyePACS + APTOS 2019 (5 epochs) → DR5 desktop | 0.9464 | 0.8000 | **0.9814** | **0.9979** | 0.9545 | **1.0000** |
+| ImageNet → EyePACS + APTOS 2019 (10 epochs) → DR5 desktop | 0.9464 | 0.8000 | **0.9814** | **0.9979** | 0.9545 | **1.0000** |
+
+**Table 3. TTA flip4 + ALFA (deployed lesion thresholds, age 60)**
+
+| Version | mtmDR Acc | mtmDR Sens | mtmDR Spec | vtDR Acc | vtDR Sens | vtDR Spec |
+|---|---|---|---|---|---|---|
+| REPORT (paper) | 0.9464 | 0.9000 | 0.9574 | 0.9957 | 0.9545 | 0.9977 |
+| Original repo model (DR5_swinMS_desktop_v1): ImageNet → DR5 desktop | **0.9528** | 0.8778 | **0.9707** | **0.9979** | 0.9545 | **1.0000** |
+| ImageNet → DR5 desktop (retrained, new checkpoint selection) | **0.9528** | 0.8778 | **0.9707** | **0.9979** | 0.9545 | **1.0000** |
+| ImageNet → DR5 desktop, input 512 | 0.9464 | 0.8333 | **0.9734** | 0.9936 | 0.9091 | 0.9977 |
+| ImageNet → DR5 desktop + JYE01 | **0.9485** | 0.8556 | **0.9707** | **0.9979** | 0.9545 | **1.0000** |
+| ImageNet → DR5 desktop + JYE01 (device × class balanced sampling) | 0.9464 | 0.8667 | **0.9654** | 0.9957 | 0.9545 | 0.9977 |
+| ImageNet → APTOS 2019 → DR5 desktop | **0.9549** | 0.8889 | **0.9707** | **0.9979** | 0.9545 | **1.0000** |
+| ImageNet → EyePACS + APTOS 2019 (5 epochs) → DR5 desktop | **0.9549** | 0.8556 | **0.9787** | **0.9979** | 0.9545 | **1.0000** |
+| ImageNet → EyePACS + APTOS 2019 (10 epochs) → DR5 desktop | **0.9528** | 0.8556 | **0.9761** | **0.9979** | 0.9545 | **1.0000** |
+
+**Table 4. TTA flip4 + ALFA (tuned lesion thresholds, age 60)**
+
+| Version | mtmDR Acc | mtmDR Sens | mtmDR Spec | vtDR Acc | vtDR Sens | vtDR Spec |
+|---|---|---|---|---|---|---|
+| REPORT (paper) | 0.9464 | 0.9000 | 0.9574 | 0.9957 | 0.9545 | 0.9977 |
+| Original repo model (DR5_swinMS_desktop_v1): ImageNet → DR5 desktop | **0.9506** | 0.9000 | **0.9628** | 0.9957 | 0.9545 | 0.9977 |
+| ImageNet → DR5 desktop (retrained, new checkpoint selection) | **0.9485** | 0.8889 | **0.9628** | 0.9957 | 0.9545 | 0.9977 |
+| ImageNet → DR5 desktop, input 512 | 0.9421 | 0.8444 | **0.9654** | 0.9893 | 0.9091 | 0.9932 |
+| ImageNet → DR5 desktop + JYE01 | 0.9399 | 0.8667 | 0.9574 | 0.9914 | 0.9545 | 0.9932 |
+| ImageNet → DR5 desktop + JYE01 (device × class balanced sampling) | 0.9227 | 0.8778 | 0.9335 | 0.9936 | 0.9545 | 0.9955 |
+| ImageNet → APTOS 2019 → DR5 desktop | **0.9528** | **0.9111** | **0.9628** | 0.9936 | 0.9545 | 0.9955 |
+| ImageNet → EyePACS + APTOS 2019 (5 epochs) → DR5 desktop | 0.9442 | 0.8556 | **0.9654** | 0.9914 | 0.9545 | 0.9932 |
+| ImageNet → EyePACS + APTOS 2019 (10 epochs) → DR5 desktop | 0.9442 | 0.8556 | **0.9654** | 0.9871 | 0.9545 | 0.9887 |
