@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run DR experiments, one queue per GPU: the GPUs run in parallel, the experiments of one GPU one after another.
 # Per experiment:
-#   train_dr.py -> eval_mtm_vt.py (argmax + TTA flip4) -> eval_mtm_vt_postprocess.py (ALFA, det_raw_0JCN, age 40)
+#   train_dr.py -> eval_mtm_vt.py (argmax + TTA flip4) -> eval_mtm_vt_postprocess.py (ALFA, det_raw_0JCN: argmax age 40;
+#   TTA age 40 / 60 deployed, age 60 tuned). Eval data = $DATA, or --eval_data <path> as the first job arg.
 #
 # Usage (from anywhere, in the conda env with torch, best inside tmux):
 #   bash scripts/run_experiments.sh                 # run the queue below
@@ -51,6 +52,8 @@ step() {
 # run <gpu> <task> <args...>: one experiment on one GPU
 run() {
   local gpu=$1 task=$2; shift 2
+  local data=$DATA   # data of the eval steps; `job <gpu> <task> --eval_data <path> ...` gives another one
+  if [ "${1:-}" = "--eval_data" ]; then data=$2; shift 2; fi
   local dir="$OUT/$task"
   local ckpt="$dir/checkpoint-best.pth"
   export CUDA_VISIBLE_DEVICES=$gpu
@@ -61,14 +64,24 @@ run() {
   if ! step "$dir/train.out" python train_dr.py "${COMMON[@]}" "$@" --task "$task"; then
     log "FAIL  $task: training, see $dir/train.out"; return
   fi
-  if ! step "$dir/eval.out" python eval_mtm_vt.py --resume "$ckpt" --data_path "$DATA" --batch_size 16 --report_split val; then
+  if ! step "$dir/eval.out" python eval_mtm_vt.py --resume "$ckpt" --data_path "$data" --batch_size 16 --report_split val; then
     log "FAIL  $task: eval, see $dir/eval.out"; return
   fi
-  step "$dir/eval_tta_flip4.out" python eval_mtm_vt.py --resume "$ckpt" --data_path "$DATA" --batch_size 16 --report_split val --tta flip4 \
+  step "$dir/eval_tta_flip4.out" python eval_mtm_vt.py --resume "$ckpt" --data_path "$data" --batch_size 16 --report_split val --tta flip4 \
     || log "WARN  $task: TTA eval failed, see $dir/eval_tta_flip4.out"
   step "$dir/postprocess.out" python eval_mtm_vt_postprocess.py --pred_csv "$dir/predictions_val.csv" --det_root "$DET" --age 40 \
       --out_dir "$dir/postprocess_$(basename "$DET")_age40" \
     || log "WARN  $task: postprocess eval failed, see $dir/postprocess.out"
+  # ALFA on the TTA predictions, 3 lesion-threshold settings (the README tables 2-4)
+  local cfg name opts
+  for cfg in "age40_deployed|--age 40" "age60_deployed|--age 60" \
+             "age60_tuned|--age 60 --threshold_config postprocess/threshold_config_tuned.json"; do
+    name=${cfg%%|*}; opts=${cfg#*|}
+    # shellcheck disable=SC2086
+    step "$dir/tta_flip4/postprocess_$name.out" python eval_mtm_vt_postprocess.py --pred_csv "$dir/tta_flip4/predictions_val.csv" \
+        --det_root "$DET" $opts --out_dir "$dir/tta_flip4/postprocess_$(basename "$DET")_$name" \
+      || log "WARN  $task: TTA postprocess $name failed, see $dir/tta_flip4/postprocess_$name.out"
+  done
 
   [ "$DRY_RUN" = 1 ] || touch "$dir/.done"
   log "DONE  $task  (GPU $gpu)"
@@ -117,6 +130,31 @@ job 2 EyeAPTOS_swinMS_384_ep10_s0           --input_size 384 --seed 0 --data_pat
 job 2 DR5_swinMS_desktop_384_eyeaptosep10ft_s0 --input_size 384 --seed 0 --finetune "$OUT/EyeAPTOS_swinMS_384_ep10_s0/checkpoint-best.pth"
 job 3 EyeAPTOS_swinMS_384_ep10_s1           --input_size 384 --seed 1 --data_path "$EA" --train_devices EyePACS APTOS --val_devices EyePACS APTOS --epochs 10
 job 3 DR5_swinMS_desktop_384_eyeaptosep10ft_s1 --input_size 384 --seed 1 --finetune "$OUT/EyeAPTOS_swinMS_384_ep10_s1/checkpoint-best.pth"
+# 2026-11-23, 3-doctor labels of the prospective images (DR5_512_consensus, tools/relabel_dataset.py; same images and
+#   split as DR5_512, 94 prospective images relabelled, 466 test: 90 -> 103 mtmDR positives): stage 2 of the best
+#   model again (APTOS s0 stage 1, done), trained and evaluated on the new labels
+CONS=/mnt/10TB_2024/Katsu/data/DR/DR5_512_consensus
+job 2 DR5cons_swinMS_desktop_384_aptosft_s0 --eval_data "$CONS" --input_size 384 --seed 0 --data_path "$CONS" --finetune "$OUT/APTOS_swinMS_384_s0/checkpoint-best.pth"
+# 2026-11-23, reproducibility: the best recipe (APTOS s0 -> DR5 desktop, old labels) twice with --deterministic,
+#   one copy per GPU (both RTX A5000, same driver). The two copies should give the same log.txt / weights;
+#   they will not equal the original s0 (trained without --deterministic). Stage 1 + 2 ~3 h per GPU.
+job 2 APTOS_swinMS_384_det_s0                    --input_size 384 --seed 0 --deterministic --data_path "$APTOS" --train_devices APTOS --val_devices APTOS
+job 2 DR5_swinMS_desktop_384_aptosft_det_s0      --input_size 384 --seed 0 --deterministic --finetune "$OUT/APTOS_swinMS_384_det_s0/checkpoint-best.pth"
+job 3 APTOS_swinMS_384_det_s0_rep                --input_size 384 --seed 0 --deterministic --data_path "$APTOS" --train_devices APTOS --val_devices APTOS
+job 3 DR5_swinMS_desktop_384_aptosft_det_s0_rep  --input_size 384 --seed 0 --deterministic --finetune "$OUT/APTOS_swinMS_384_det_s0_rep/checkpoint-best.pth"
+# 2026-11-24, two-stage with stage 1 = Fundus_FDR26 instead of APTOS (tools/prepare_fdr26.py: 2777 images after
+#   removing exact duplicates, split 90/10 by patient + same-eye groups; train 2497, select on val 280; test/ = val).
+#   Same recipe as the det_s0 pair above (--deterministic, seed 0), so it compares directly with
+#   APTOS_swinMS_384_det_s0 -> DR5_swinMS_desktop_384_aptosft_det_s0. Stage 1 + 2 ~3 h.
+FDR=/mnt/10TB_2024/Katsu/data/DR/Fundus_FDR26_512
+job 2 FDR26_swinMS_384_det_s0                    --input_size 384 --seed 0 --deterministic --data_path "$FDR" --train_devices FDR26 --val_devices FDR26
+job 2 DR5_swinMS_desktop_384_fdrft_det_s0        --input_size 384 --seed 0 --deterministic --finetune "$OUT/FDR26_swinMS_384_det_s0/checkpoint-best.pth"
+# 2026-11-24, the same with IDRiD added to the stage-1 TRAIN (tools/prepare_idrid.py: Kaggle copy, 448 images after
+#   removing exact duplicates, all in train; merged by tools/merge_datasets.py --test_from_val): train 2945
+#   (FDR26 2497 + IDRiD 448), select on the same FDR26 val 280 as the FDR26-only run above (parallel, GPU 3)
+FI=/mnt/10TB_2024/Katsu/data/DR/FDR26_IDRiD_512
+job 3 FDR26IDRiD_swinMS_384_det_s0               --input_size 384 --seed 0 --deterministic --data_path "$FI" --train_devices FDR26 IDRiD --val_devices FDR26
+job 3 DR5_swinMS_desktop_384_fdridft_det_s0      --input_size 384 --seed 0 --deterministic --finetune "$OUT/FDR26IDRiD_swinMS_384_det_s0/checkpoint-best.pth"
 
 # ---------------- launch: one background queue per GPU ----------------
 gpu_queue() {
