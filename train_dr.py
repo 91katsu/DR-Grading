@@ -12,6 +12,7 @@ import argparse
 import datetime
 import json
 import os
+import random
 import time
 from pathlib import Path
 import warnings
@@ -157,6 +158,10 @@ def get_args_parser():
     # ---- Runtime
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", default=0, type=int)
+    parser.add_argument("--deterministic", action="store_true",
+                        help="bit-reproducible training on the same GPU model / driver / library versions: "
+                             "cudnn.benchmark off, deterministic cuDNN / cuBLAS / torch ops (slower). Ops without a "
+                             "deterministic version only warn (grep train.out for 'deterministic')")
     parser.add_argument("--resume", default="", help="Resume full state (optimizer, scaler, etc.)")
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N")
     parser.add_argument("--eval", action="store_true", help="Evaluation only")
@@ -209,7 +214,14 @@ def main(args, criterion):
     seed = args.seed + misc.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
-    cudnn.benchmark = True
+    random.seed(seed)
+    if getattr(args, "deterministic", False):
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        print(f"[deterministic] on: CUBLAS_WORKSPACE_CONFIG={os.environ.get('CUBLAS_WORKSPACE_CONFIG')}")
+    else:
+        cudnn.benchmark = True
 
     # ---- Build model + load pre-trained weights (not for eval-only)
     model = build_model(args)
@@ -451,6 +463,8 @@ def main(args, criterion):
 if __name__ == "__main__":
     args = get_args_parser()
     args = args.parse_args()
+    if args.deterministic:  # cuBLAS reads it when CUDA starts, so before any CUDA call
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
     criterion = torch.nn.CrossEntropyLoss()
 
